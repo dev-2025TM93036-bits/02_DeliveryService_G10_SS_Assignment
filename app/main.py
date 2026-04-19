@@ -102,6 +102,10 @@ def get_db():
         db.close()
 
 
+def next_id(db: Session, model, column) -> int:
+    return (db.query(func.max(column)).scalar() or 0) + 1
+
+
 def seed_data():
     with SessionLocal() as db:
         if db.query(Driver).first():
@@ -179,7 +183,7 @@ def assign_delivery(payload: AssignRequest, db: Session = Depends(get_db)):
     driver = db.query(Driver).outerjoin(Delivery).filter(Driver.is_active == True).group_by(Driver.driver_id).order_by(func.count(Delivery.delivery_id).asc(), Driver.driver_id.asc()).first()
     if not driver:
         raise ApiError("NO_DRIVER_AVAILABLE", "No active driver available", 409)
-    delivery = Delivery(order_id=payload.order_id, driver_id=driver.driver_id, status="ASSIGNED", assigned_at=datetime.utcnow())
+    delivery = Delivery(delivery_id=next_id(db, Delivery, Delivery.delivery_id), order_id=payload.order_id, driver_id=driver.driver_id, status="ASSIGNED", assigned_at=datetime.utcnow())
     db.add(delivery)
     db.commit()
     db.refresh(delivery)
