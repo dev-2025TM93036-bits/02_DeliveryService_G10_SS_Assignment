@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
@@ -68,6 +68,17 @@ class AssignRequest(BaseModel):
     city: str
 
 
+class DriverCreate(BaseModel):
+    name: str
+    phone: str
+    vehicle_type: str
+    is_active: bool
+
+
+class DriverUpdate(DriverCreate):
+    pass
+
+
 class DeliveryStatusUpdate(BaseModel):
     status: str
 
@@ -106,6 +117,11 @@ def get_db():
 
 def next_id(db: Session, model, column) -> int:
     return (db.query(func.max(column)).scalar() or 0) + 1
+
+
+def validate_phone(phone: str) -> None:
+    if not phone.isdigit() or len(phone) < 10:
+        raise ApiError("INVALID_PHONE", "Phone must contain at least 10 digits", 400)
 
 
 def seed_data():
@@ -169,12 +185,60 @@ def list_drivers(is_active: Optional[bool] = None, db: Session = Depends(get_db)
     return query.all()
 
 
+@app.post("/v1/drivers", response_model=DriverOut, status_code=201)
+def create_driver(payload: DriverCreate, db: Session = Depends(get_db)):
+    validate_phone(payload.phone)
+    if db.query(Driver).filter(Driver.phone == payload.phone).first():
+        raise ApiError("DRIVER_EXISTS", "Driver phone already exists", 409)
+    driver = Driver(driver_id=next_id(db, Driver, Driver.driver_id), **payload.model_dump())
+    db.add(driver)
+    db.commit()
+    db.refresh(driver)
+    return driver
+
+
+@app.put("/v1/drivers/{driver_id}", response_model=DriverOut)
+def update_driver(driver_id: int, payload: DriverUpdate, db: Session = Depends(get_db)):
+    driver = db.get(Driver, driver_id)
+    if not driver:
+        raise ApiError("DRIVER_NOT_FOUND", f"Driver {driver_id} not found", 404)
+    validate_phone(payload.phone)
+    existing = db.query(Driver).filter(Driver.phone == payload.phone, Driver.driver_id != driver_id).first()
+    if existing:
+        raise ApiError("DRIVER_EXISTS", "Driver phone already exists", 409)
+    for field, value in payload.model_dump().items():
+        setattr(driver, field, value)
+    db.commit()
+    db.refresh(driver)
+    return driver
+
+
+@app.delete("/v1/drivers/{driver_id}", status_code=204)
+def delete_driver(driver_id: int, db: Session = Depends(get_db)):
+    driver = db.get(Driver, driver_id)
+    if not driver:
+        raise ApiError("DRIVER_NOT_FOUND", f"Driver {driver_id} not found", 404)
+    if db.query(Delivery).filter(Delivery.driver_id == driver_id, Delivery.status != "DELIVERED").first():
+        raise ApiError("DRIVER_DELETE_BLOCKED", "Driver has active deliveries", 409)
+    db.delete(driver)
+    db.commit()
+    return Response(status_code=204)
+
+
 @app.get("/v1/deliveries", response_model=list[DeliveryOut])
 def list_deliveries(status: Optional[str] = None, limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0), db: Session = Depends(get_db)):
     query = db.query(Delivery)
     if status:
         query = query.filter(Delivery.status == status)
     return query.order_by(Delivery.delivery_id.desc()).offset(offset).limit(limit).all()
+
+
+@app.get("/v1/deliveries/{delivery_id}", response_model=DeliveryOut)
+def get_delivery(delivery_id: int, db: Session = Depends(get_db)):
+    delivery = db.get(Delivery, delivery_id)
+    if not delivery:
+        raise ApiError("DELIVERY_NOT_FOUND", f"Delivery {delivery_id} not found", 404)
+    return delivery
 
 
 @app.post("/v1/deliveries/assign")
@@ -211,3 +275,15 @@ def update_delivery_status(delivery_id: int, payload: DeliveryStatusUpdate, db: 
         delivery.delivered_at = now
     db.commit()
     return {"delivery_id": delivery.delivery_id, "status": delivery.status}
+
+
+@app.delete("/v1/deliveries/{delivery_id}", status_code=204)
+def delete_delivery(delivery_id: int, db: Session = Depends(get_db)):
+    delivery = db.get(Delivery, delivery_id)
+    if not delivery:
+        raise ApiError("DELIVERY_NOT_FOUND", f"Delivery {delivery_id} not found", 404)
+    if delivery.status == "DELIVERED":
+        raise ApiError("DELIVERY_DELETE_BLOCKED", "Delivered records are retained for audit", 409)
+    db.delete(delivery)
+    db.commit()
+    return Response(status_code=204)
