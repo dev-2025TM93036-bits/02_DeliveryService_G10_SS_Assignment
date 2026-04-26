@@ -178,11 +178,11 @@ def metrics():
 
 
 @app.get("/v1/drivers", response_model=list[DriverOut])
-def list_drivers(is_active: Optional[bool] = None, db: Session = Depends(get_db)):
+def list_drivers(is_active: Optional[bool] = None, limit: int = Query(10, ge=1, le=100), offset: int = Query(0, ge=0), db: Session = Depends(get_db)):
     query = db.query(Driver)
     if is_active is not None:
         query = query.filter(Driver.is_active == is_active)
-    return query.all()
+    return query.order_by(Driver.driver_id.asc()).offset(offset).limit(limit).all()
 
 
 @app.post("/v1/drivers", response_model=DriverOut, status_code=201)
